@@ -1,0 +1,30 @@
+services:
+  backend:
+    build: ./backend
+    image: ${DOCKER_USERNAME:-local}/parcial2-backend:${IMAGE_TAG:-latest}
+    container_name: parcial2-backend
+    restart: unless-stopped
+    environment:
+      - DB_PATH=/app/data/tareas.db
+      - OTEL_ENABLED=${OTEL_ENABLED:-false}
+      - OTEL_SERVICE_NAME=api-tareas-backend
+      - O2_BASE_URL=${O2_BASE_URL:-http://host.docker.internal:5080}
+      - O2_USER=${O2_USER:-admin@uteq.edu.mx}
+      - O2_PASS=${O2_PASS:-ObsAdmin#2026}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - tareas-data:/app/data
+
+  frontend:
+    build: ./frontend
+    image: ${DOCKER_USERNAME:-local}/parcial2-frontend:${IMAGE_TAG:-latest}
+    container_name: parcial2-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8090:80"
+
+volumes:
+  tareas-data:

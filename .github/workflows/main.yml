@@ -1,0 +1,269 @@
+name: CI/CD Parcial 2 - Pruebas Integrales y Observabilidad
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # ==========================================
+  # JOB 1: PRUEBAS BACKEND + FRONTEND + REPORTE A OPENOBSERVE
+  # ==========================================
+  ci-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias de Backend y QA
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r requirements-test.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Ejecutar 500 pruebas de Backend (Pytest + Cobertura)
+        id: backend
+        continue-on-error: true
+        env:
+          OTEL_ENABLED: "false"
+        run: |
+          python -m pytest tests/test_backend.py --cov=backend/app --cov-report=term-missing --cov-fail-under=70
+
+      - name: Levantar stack local y ejecutar 500 pruebas E2E (Playwright)
+        id: frontend
+        continue-on-error: true
+        env:
+          OTEL_ENABLED: "false"
+          APP_URL: "http://localhost:8090"
+          CAPTURE_SCREENSHOTS: "failures"
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8090/api/health > /dev/null; then
+              echo "Stack listo en puerto 8090"
+              break
+            fi
+            sleep 2
+          done
+          curl -sf http://localhost:8090/api/health
+          python -m pytest tests/test_frontend_e2e.py --html=reporte_pruebas_parcial2.html --self-contained-html
+
+      - name: Detener stack temporal de pruebas
+        if: always()
+        run: docker compose down -v
+
+      - name: Guardar reporte HTML como artefacto de GitHub Actions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-playwright-parcial2
+          path: reporte_pruebas_parcial2.html
+          if-no-files-found: ignore
+
+      - name: Enviar resultado de pruebas (CI) a OpenObserve
+        if: always()
+        env:
+          O2_BASE_URL: ${{ secrets.O2_BASE_URL }}
+          O2_USER: ${{ secrets.O2_USER }}
+          O2_PASS: ${{ secrets.O2_PASS }}
+          BACKEND_STATUS: ${{ steps.backend.outcome }}
+          FRONTEND_STATUS: ${{ steps.frontend.outcome }}
+          COMMIT_SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - << 'EOF'
+          import base64, json, os, urllib.request
+          from datetime import datetime, timezone
+
+          backend_ok = os.environ["BACKEND_STATUS"] == "success"
+          frontend_ok = os.environ["FRONTEND_STATUS"] == "success"
+          overall = "success" if (backend_ok and frontend_ok) else "failure"
+
+          payload = [{
+              "event_type": "ci_test_run",
+              "status": overall,
+              "backend_status": os.environ["BACKEND_STATUS"],
+              "frontend_status": os.environ["FRONTEND_STATUS"],
+              "total_tests_expected": 1000,
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "branch": os.environ["BRANCH"],
+              "actor": os.environ["ACTOR"],
+              "repository": os.environ["REPO"],
+              "workflow_run_id": os.environ["RUN_ID"],
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+          }]
+
+          url = os.environ["O2_BASE_URL"].rstrip("/") + "/api/default/cicd_events/_json"
+          creds = f'{os.environ["O2_USER"]}:{os.environ["O2_PASS"]}'.encode("utf-8")
+          auth = base64.b64encode(creds).decode("utf-8")
+
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Basic {auth}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              print(f"[OpenObserve] Evento ci_test_run ({overall}) -> HTTP {resp.status}")
+          EOF
+
+      - name: Compuerta de calidad (Bloquear SSH si alguna suite falló)
+        run: |
+          if [ "${{ steps.backend.outcome }}" != "success" ] || [ "${{ steps.frontend.outcome }}" != "success" ]; then
+            echo "Fallo detectado en pruebas (Backend=${{ steps.backend.outcome }}, Frontend=${{ steps.frontend.outcome }}). Despliegue a EC2 bloqueado."
+            exit 1
+          fi
+          echo "Todas las pruebas aprobaron. Autorizado para despliegue en EC2."
+
+  # ==========================================
+  # JOB 2: PUBLICACIÓN EN DOCKER HUB Y DESPLIEGUE EN AWS EC2
+  # ==========================================
+  build-and-deploy:
+    needs: ci-tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Iniciar sesión en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Construir y publicar imagen Backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/parcial2-backend:latest
+            ${{ secrets.DOCKER_USERNAME }}/parcial2-backend:${{ github.sha }}
+
+      - name: Construir y publicar imagen Frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/parcial2-frontend:latest
+            ${{ secrets.DOCKER_USERNAME }}/parcial2-frontend:${{ github.sha }}
+
+      - name: Desplegar contenedores en AWS EC2 por SSH
+        id: deploy_ec2
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          IMAGE_TAG: ${{ github.sha }}
+          O2_USER: ${{ secrets.O2_USER }}
+          O2_PASS: ${{ secrets.O2_PASS }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: DOCKER_USERNAME,IMAGE_TAG,O2_USER,O2_PASS
+          script: |
+            set -e
+            mkdir -p ~/parcial2-app
+            cd ~/parcial2-app
+            cat << EOF > docker-compose.yml
+            services:
+              backend:
+                image: ${DOCKER_USERNAME}/parcial2-backend:${IMAGE_TAG}
+                container_name: parcial2-backend
+                restart: unless-stopped
+                environment:
+                  - DB_PATH=/app/data/tareas.db
+                  - OTEL_ENABLED=true
+                  - OTEL_SERVICE_NAME=api-tareas-backend
+                  - O2_BASE_URL=http://host.docker.internal:5080
+                  - "O2_USER=${O2_USER}"
+                  - "O2_PASS=${O2_PASS}"
+                extra_hosts:
+                  - "host.docker.internal:host-gateway"
+                volumes:
+                  - tareas-data:/app/data
+
+              frontend:
+                image: ${DOCKER_USERNAME}/parcial2-frontend:${IMAGE_TAG}
+                container_name: parcial2-frontend
+                restart: unless-stopped
+                depends_on:
+                  - backend
+                ports:
+                  - "8090:80"
+
+            volumes:
+              tareas-data:
+            EOF
+            sudo docker compose pull
+            sudo docker compose up -d --force-recreate
+            sudo docker image prune -f
+            for i in $(seq 1 15); do
+              if curl -sf http://127.0.0.1:8090/api/health > /dev/null; then
+                echo "Aplicación Parcial 2 saludable en puerto 8090"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "La aplicación no respondió en el puerto 8090"
+            exit 1
+
+      - name: Registrar evento de despliegue (CD) en OpenObserve
+        if: always()
+        env:
+          O2_BASE_URL: ${{ secrets.O2_BASE_URL }}
+          O2_USER: ${{ secrets.O2_USER }}
+          O2_PASS: ${{ secrets.O2_PASS }}
+          DEPLOY_STATUS: ${{ steps.deploy_ec2.outcome }}
+          COMMIT_SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - << 'EOF'
+          import base64, json, os, urllib.request
+          from datetime import datetime, timezone
+
+          payload = [{
+              "event_type": "ec2_deploy",
+              "status": os.environ["DEPLOY_STATUS"],
+              "commit_sha": os.environ["COMMIT_SHA"],
+              "branch": os.environ["BRANCH"],
+              "actor": os.environ["ACTOR"],
+              "repository": os.environ["REPO"],
+              "workflow_run_id": os.environ["RUN_ID"],
+              "target": "aws-ec2:8090",
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+          }]
+
+          url = os.environ["O2_BASE_URL"].rstrip("/") + "/api/default/cicd_events/_json"
+          creds = f'{os.environ["O2_USER"]}:{os.environ["O2_PASS"]}'.encode("utf-8")
+          auth = base64.b64encode(creds).decode("utf-8")
+
+          req = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Basic {auth}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=15) as resp:
+              print(f"[OpenObserve] Evento ec2_deploy ({os.environ['DEPLOY_STATUS']}) -> HTTP {resp.status}")
+          EOF

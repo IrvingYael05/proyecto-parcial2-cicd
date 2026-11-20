@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gestor de Tareas | CI/CD & Observabilidad</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+      }
+      body {
+        max-width: 760px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        background: #f4f6f9;
+        color: #1f2937;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin-bottom: 1.5rem;
+      }
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .badge {
+        padding: 0.35rem 0.75rem;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        background: #e5e7eb;
+      }
+      .badge.ok {
+        background: #dcfce7;
+        color: #166534;
+      }
+      .badge.err {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+      .card {
+        background: #fff;
+        padding: 1.25rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+        margin-bottom: 1.25rem;
+      }
+      .login-card {
+        max-width: 420px;
+        margin: 2rem auto;
+      }
+      form {
+        display: grid;
+        gap: 0.75rem;
+      }
+      input[type="text"],
+      input[type="email"],
+      input[type="password"] {
+        width: 100%;
+        padding: 0.65rem;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font-size: 0.95rem;
+      }
+      .actions {
+        display: flex;
+        gap: 0.5rem;
+      }
+      button {
+        padding: 0.6rem 1rem;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .btn-primary {
+        background: #2563eb;
+        color: #fff;
+      }
+      .btn-secondary {
+        background: #6b7280;
+        color: #fff;
+      }
+      .btn-danger {
+        background: #dc2626;
+        color: #fff;
+      }
+      .btn-sm {
+        padding: 0.35rem 0.65rem;
+        font-size: 0.85rem;
+      }
+      .error {
+        color: #b91c1c;
+        background: #fee2e2;
+        padding: 0.6rem;
+        border-radius: 6px;
+        display: none;
+        font-size: 0.9rem;
+      }
+      .user-bar {
+        display: none;
+        align-items: center;
+        gap: 0.6rem;
+        font-size: 0.9rem;
+        color: #374151;
+      }
+      .filters {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+      .filters button.active {
+        background: #1d4ed8;
+        color: #fff;
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 0.75rem;
+      }
+      li {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.85rem;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      li.completada .task-title {
+        text-decoration: line-through;
+        color: #6b7280;
+      }
+      .task-desc {
+        margin: 0.2rem 0 0;
+        font-size: 0.85rem;
+        color: #4b5563;
+      }
+      .empty {
+        text-align: center;
+        color: #6b7280;
+        padding: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1 data-testid="app-title">Gestor de Tareas</h1>
+      <div class="header-right">
+        <div id="user-bar" data-testid="user-bar" class="user-bar">
+          <span id="user-email" data-testid="user-email"></span>
+          <button
+            type="button"
+            id="btn-logout"
+            data-testid="btn-logout"
+            class="btn-sm btn-secondary"
+          >
+            Cerrar sesión
+          </button>
+        </div>
+        <span id="health-badge" data-testid="health-badge" class="badge"
+          >Verificando API...</span
+        >
+      </div>
+    </header>
+
+    <section
+      id="login-section"
+      data-testid="login-section"
+      class="card login-card"
+    >
+      <h2 style="margin-top: 0">Iniciar sesión</h2>
+      <form id="login-form" data-testid="login-form" novalidate>
+        <input
+          type="email"
+          id="login-email"
+          data-testid="login-email"
+          placeholder="Correo electrónico"
+          autocomplete="username"
+        />
+        <input
+          type="password"
+          id="login-password"
+          data-testid="login-password"
+          placeholder="Contraseña"
+          autocomplete="current-password"
+        />
+        <div id="login-error" data-testid="login-error" class="error"></div>
+        <button
+          type="submit"
+          id="btn-login"
+          data-testid="btn-login"
+          class="btn-primary"
+        >
+          Ingresar
+        </button>
+      </form>
+    </section>
+
+    <div id="app-section" data-testid="app-section" style="display: none">
+      <section class="card">
+        <form id="tarea-form" data-testid="tarea-form" novalidate>
+          <input type="hidden" id="edit-id" value="" />
+          <input
+            type="text"
+            id="titulo"
+            data-testid="input-titulo"
+            placeholder="Título de la tarea *"
+          />
+          <input
+            type="text"
+            id="descripcion"
+            data-testid="input-descripcion"
+            placeholder="Descripción (opcional)"
+          />
+          <div id="error-msg" data-testid="error-msg" class="error"></div>
+          <div class="actions">
+            <button
+              type="submit"
+              id="btn-guardar"
+              data-testid="btn-guardar"
+              class="btn-primary"
+            >
+              Agregar tarea
+            </button>
+            <button
+              type="button"
+              id="btn-cancelar"
+              data-testid="btn-cancelar"
+              class="btn-secondary"
+              style="display: none"
+            >
+              Cancelar edición
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="filters">
+          <button
+            type="button"
+            data-filter="todas"
+            data-testid="filter-todas"
+            class="active"
+          >
+            Todas
+          </button>
+          <button
+            type="button"
+            data-filter="pendientes"
+            data-testid="filter-pendientes"
+          >
+            Pendientes
+          </button>
+          <button
+            type="button"
+            data-filter="completadas"
+            data-testid="filter-completadas"
+          >
+            Completadas
+          </button>
+        </div>
+        <ul id="lista-tareas" data-testid="lista-tareas"></ul>
+      </section>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
