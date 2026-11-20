@@ -32,8 +32,9 @@ jobs:
         continue-on-error: true
         env:
           OTEL_ENABLED: "false"
+          PYTHONPATH: "backend"
         run: |
-          python -m pytest tests/test_backend.py --cov=backend/app --cov-report=term-missing --cov-fail-under=70
+          python -m pytest tests/test_backend.py --cov=app --cov-report=term-missing --cov-fail-under=70
 
       - name: Levantar stack local y ejecutar 500 pruebas E2E (Playwright)
         id: frontend
